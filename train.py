@@ -32,7 +32,7 @@ try:
 except ImportError: # will be 3.x series
     print('This is not an error. If you want to use low precision, i.e., fp16, please install the apex with cuda support (https://github.com/NVIDIA/apex) and update pytorch to 1.0')
 
-from pytorch_metric_learning import losses, miners #pip install pytorch-metric-learning
+from pytorch_metric_learning import losses, distances, miners #pip install pytorch-metric-learning
 
 ######################################################################
 # Options
@@ -207,6 +207,32 @@ def fliplr(img):
     img_flip = img.index_select(3,inv_idx)
     return img_flip
 
+
+class DirectionAwareDistance(distances.BaseDistance):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert not self.is_inverted
+
+    def compute_mat(self, query_emb, ref_emb):
+        dtype, device = query_emb.dtype, query_emb.device
+        if ref_emb is None:
+            ref_emb = query_emb
+        if dtype == torch.float16:  # cdist doesn't work for float16
+            rows, cols = lmu.meshgrid_from_sizes(query_emb, ref_emb, dim=0)
+            output = torch.zeros(rows.size(), dtype=dtype, device=device)
+            rows, cols = rows.flatten(), cols.flatten()
+            distances = self.pairwise_distance(query_emb[rows], ref_emb[cols])
+            output[rows, cols] = distances
+            return output
+        else:
+            return torch.cdist(query_emb, ref_emb, p=self.p)
+
+    def pairwise_distance(self, x1, x2):
+        mse = (x1 - x2).square().mean(dim=1, keepdim=True)
+        cosine_dist = 1 - torch.cosine_similarity(x1, x2).unsqueeze(dim=1)
+        return torch.sqrt(mse + cosine_dist)
+
+
 def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
     since = time.time()
 
@@ -222,7 +248,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
         criterion_circle = CircleLoss(m=0.25, gamma=32) # gamma = 64 may lead to a better result.
     if opt.triplet:
         miner = miners.MultiSimilarityMiner()
-        criterion_triplet = losses.TripletMarginLoss(margin=0.3)
+        criterion_triplet = losses.TripletMarginLoss(margin=0.3, distance=DirectionAwareDistance())
     if opt.lifted:
         criterion_lifted = losses.GeneralizedLiftedStructureLoss(neg_margin=1, pos_margin=0)
     if opt.contrast: 
